@@ -5,8 +5,10 @@ import math
 import time
 import json
 import copy
+import ctypes
 import random
 import psutil
+import signal
 import pathlib
 import platform
 import traceback
@@ -29,88 +31,96 @@ sys.path.insert(0, str(MICRO_PERF_DIR))
 from core.utils import logger, get_numa_info
 
 
-# collect all backends OP_MAPPING
 SUPPORTED_OPS = {
-    # xccl_ops
-    "all_reduce": {"default_engine": "XCCLEngine"},
-    "reduce_scatter": {"default_engine": "XCCLEngine"},
-    "all_gather": {"default_engine": "XCCLEngine"},
-    "all_to_all": {"default_engine": "XCCLEngine"},
-    "broadcast": {"default_engine": "XCCLEngine"},
-    "p2p": {"default_engine": "P2PEngine"},
+    "XCCLEngine": [
+        "all_reduce", 
+        "reduce_scatter", 
+        "all_gather", 
+        "all_to_all", 
+        "broadcast", 
+        "p2p", 
 
-    "all_reduce_h2d": {"default_engine": "XCCLEngine"}, 
+        "all_reduce_h2d", 
 
-    "host2device": {"default_engine": "XCCLEngine"},
-    "device2host": {"default_engine": "XCCLEngine"},
-    "device2device": {"default_engine": "ComputeEngine"},
+        "host2device", 
+        "device2host", 
+    ], 
+    "ComputeEngine": [
+        "device2device", 
 
-    # vector_linear_ops
-    "add": {"default_engine": "ComputeEngine"},
-    "sub": {"default_engine": "ComputeEngine"},
-    "mul": {"default_engine": "ComputeEngine"},
-    "cast": {"default_engine": "ComputeEngine"},
+        # vector_linear_ops
+        "add",
+        "sub",
+        "mul",
+        "cast",
 
-    # vector_sfu_ops
-    "div": {"default_engine": "ComputeEngine"},
-    "sin": {"default_engine": "ComputeEngine"},
-    "cos": {"default_engine": "ComputeEngine"},
-    "exp": {"default_engine": "ComputeEngine"},
-    "log": {"default_engine": "ComputeEngine"},
-    "sqrt": {"default_engine": "ComputeEngine"},
+        # vector_sfu_ops
+        "div",
+        "sin",
+        "cos",
+        "exp",
+        "log",
+        "sqrt",
 
-    # vector_reduction_ops
-    "reduce_max": {"default_engine": "ComputeEngine"},
-    "reduce_min": {"default_engine": "ComputeEngine"},
-    "reduce_sum": {"default_engine": "ComputeEngine"},
-    "topk": {"default_engine": "ComputeEngine"},
+        # vector_reduction_ops
+        "reduce_max",
+        "reduce_min",
+        "reduce_sum",
+        "topk",
 
-    # vector_norm_ops
-    "layer_norm": {"default_engine": "ComputeEngine"},
-    "rms_norm": {"default_engine": "ComputeEngine"},
-    "softmax": {"default_engine": "ComputeEngine"},
+        # vector_norm_ops
+        "layer_norm",
+        "rms_norm",
+        "softmax",
 
-    # vector_activation_ops
-    "gelu": {"default_engine": "ComputeEngine"},
-    "silu": {"default_engine": "ComputeEngine"},
+        # vector_activation_ops
+        "gelu",
+        "silu",
 
-    # vector_index_ops
-    "sort": {"default_engine": "ComputeEngine"},
-    "embedding": {"default_engine": "ComputeEngine"},
-    "gather": {"default_engine": "ComputeEngine"},
-    "index_select": {"default_engine": "ComputeEngine"},
-    "scatter": {"default_engine": "ComputeEngine"},
-    "index_add": {"default_engine": "ComputeEngine"},
+        # vector_index_ops
+        "sort",
+        "embedding",
+        "gather",
+        "index_select",
+        "scatter",
+        "index_add",
 
-    # tensor_gemm_ops
-    "gemm": {"default_engine": "ComputeEngine"},
+        # tensor_gemm_ops
+        "gemm",
 
-    # llm: basic
-    "scale_dynamic_quant": {"default_engine": "ComputeEngine"},
-    "add_rms_norm_dynamic_quant": {"default_engine": "ComputeEngine"},
-    "add_rms_norm": {"default_engine": "ComputeEngine"},
+        # llm: basic
+        "scale_dynamic_quant",
+        "add_rms_norm_dynamic_quant",
+        "add_rms_norm",
 
-    # llm: MOE
-    "moe_gating_gemm": {"default_engine": "ComputeEngine"},
-    "moe_softmax_topk": {"default_engine": "ComputeEngine"},
-    "moe_scatter_dynamic_quant": {"default_engine": "ComputeEngine"},
-    "quant_matmul": {"default_engine": "ComputeEngine"},
-    "quant_group_gemm_reduce_sum": {"default_engine": "ComputeEngine"},
-    "moe_quant_group_gemm": {"default_engine": "ComputeEngine"},
-    "moe_quant_group_gemm_combine": {"default_engine": "ComputeEngine"},
-    "moe_swiglu_dynamic_quant": {"default_engine": "ComputeEngine"},
-    "swiglu_dynamic_quant": {"default_engine": "ComputeEngine"},
-    "moe_gather": {"default_engine": "ComputeEngine"},
+        # llm: MOE
+        "moe_gating_gemm",
+        "moe_softmax_topk",
+        "moe_scatter_dynamic_quant",
+        "quant_matmul",
+        "quant_group_gemm_reduce_sum",
+        "moe_quant_group_gemm",
+        "moe_quant_group_gemm_combine",
+        "moe_swiglu_dynamic_quant",
+        "swiglu_dynamic_quant",
+        "moe_gather",
 
-    # llm: ATTN
-    "head_rms_norm": {"default_engine": "ComputeEngine"},
-    "head_rms_norm_dynamic_quant": {"default_engine": "ComputeEngine"},
-    "rotary_embedding": {"default_engine": "ComputeEngine"},
-    "store_kv_cache": {"default_engine": "ComputeEngine"},
-    "dequant_kv_cache": {"default_engine": "ComputeEngine"},
-    "flash_attention": {"default_engine": "ComputeEngine"},
-
+        # llm: ATTN
+        "head_rms_norm",
+        "head_rms_norm_dynamic_quant",
+        "rotary_embedding",
+        "store_kv_cache",
+        "dequant_kv_cache",
+        "flash_attention",
+    ]
 }
+
+OP_ENGINE_MAPPING = {}
+for engine_name, engine_ops in SUPPORTED_OPS.items():
+    for op_name in engine_ops:
+        OP_ENGINE_MAPPING[op_name] = engine_name
+
+
 
 
 
@@ -139,7 +149,6 @@ class Backend(ABC):
 
         # 获取系统的基本信息
         self.common_info = self.get_common_info()
-
 
         self.op_mapping = {}
 
@@ -209,32 +218,26 @@ class Backend(ABC):
     def load_all_ops(self):
         """
         op0:
-            provider0: ComputeEngine
-            provider1: ComputeEngine
+            provider0: op0_cls0
+            provider1: op0_cls1
         op1:
-            provider0: XCCLEngine
+            provider0: op1_cls0
         
         """
         self.op_mapping = {}
-        for op_name, op_config in SUPPORTED_OPS.items():
-            default_engine = op_config["default_engine"]
-
-            try:
-                backend_ops = importlib.import_module(f"backends.{self.backend_type}.ops.{op_name}")
-                op_providers = getattr(backend_ops, "OP_MAPPING")
-
-                self.op_mapping[op_name] = {}
-
-                for provider_name, op_cls in op_providers.items():
-                    self.op_mapping[op_name][provider_name] = {
-                        "op_cls": op_cls,
-                        "engine_name": default_engine
-                    }
-
-            except Exception as e:
-                logger.warning(f"load op {op_name} failed, error: {e}")
-                continue
-
+        for _, engine_ops in SUPPORTED_OPS.items():
+            for op_name in engine_ops:
+                try:
+                    backend_ops = importlib.import_module(f"backends.{self.backend_type}.ops.{op_name}")
+                    op_providers = getattr(backend_ops, "OP_MAPPING")
+                    self.op_mapping[op_name] = {}
+                    for provider_name, op_cls in op_providers.items():
+                        self.op_mapping[op_name][provider_name] = {
+                            "op_cls": op_cls
+                        }
+                except Exception as e:
+                    logger.warning(f"load op {op_name} failed, error: {e}")
+                    continue
 
     """
     清楚与backend相关的bench过程中产生的results
@@ -443,6 +446,7 @@ class Backend(ABC):
         input_queue : mp.Queue,
         output_queue : mp.Queue
     ):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         cur_process_info = process_mapping[local_process_rank]
 
         # set cpu affinity
@@ -498,15 +502,9 @@ class Backend(ABC):
 
                 print(f"{pt}\n{arguments_str}\n{targets_str}\n")
 
-                result_dict = {
-                    "provider": op_provider,
-                    "arguments": copy.deepcopy(task_case),
-                    "targets": target_dict
-                }
+                result_dict = target_dict
 
             output_queue.put((case_idx, result_dict))
-        
-
         
 
     
@@ -521,6 +519,7 @@ class Backend(ABC):
         node_world_size: int, 
         node_rank: int,
     ):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         cur_process_info = process_mapping[local_process_rank]
 
         # set cpu affinity
@@ -670,19 +669,9 @@ class Backend(ABC):
 
                 print(f"{pt}\n{arguments_str}\n{targets_str}\n")
 
-                result_dict = {
-                    "provider": op_provider, 
-                    "device_id": device_id_list,
-                    "arguments": copy.deepcopy(task_case),
-                    "targets": new_target_dict,
-                }
+                result_dict = new_target_dict
                 output_queue.put((case_idx, result_dict))
             
         if world_size > 1:
             dist.destroy_process_group()
-            
-
     
-
-
-        

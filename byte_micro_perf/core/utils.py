@@ -694,23 +694,4 @@ def static_quant(
 
     return quant_tokens
 
-
-if __name__ == "__main__":
-    num_scatter_tokens, \
-    num_scatter_tokens_per_rank, \
-    num_experts_per_rank, \
-    experts_start_idx, \
-    experts_end_idx, \
-    all_select_experts, \
-    all_select_weights, \
-    dispatch_tokens, \
-    used_src_tokens, \
-    expert_dispatch_tokens, \
-    expert_dispatch_weights, \
-    expert_dispatch_tokens_flatten, \
-    expert_dispatch_weights_flatten, \
-    expert_dispatch_token_count, \
-    expert_dispatch_token_offset = \
-        get_moe_tokens_info(64, 128, 6, 8, 0)
-
     

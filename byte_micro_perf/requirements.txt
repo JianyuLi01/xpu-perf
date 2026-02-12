@@ -1,3 +1,5 @@
 prettytable
 jsonlines
 psutil
+flask
+requests
