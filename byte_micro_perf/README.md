@@ -1,4 +1,4 @@
-# ByteMicroPerf
+# `xpu-perf`：micro_perf
 
 ## Introduction
 micro_perf is a part of xpu-perf, which is mainly used to evaluate the performance of frequent computation and communication operators in mainstream deep learning models on new emerging heterogeneous hardwares. The main characteristics are as follows:
@@ -9,52 +9,103 @@ micro_perf is a part of xpu-perf, which is mainly used to evaluate the performan
 
 ## Quickstart
 
-### Prepare running environment
+### 1. Prepare running environment
 ```
 git clone git@github.com:bytedance/xpu-perf.git
 cd xpu-perf/byte_micro_perf
 ```
 
-### An example
+### 2. A quick start for local bench
+#### 2.1 Commands
+```bash
+# Bench add/all_reduce ops with default workloads under workloads/basic
+python3 launch.py --backend GPU --task add,all_reduce
 ```
-python3 launch.py --backend GPU --task add
-```
-#### Usage
-```
-usage: launch.py [-h] [--backend {GPU}] [--show_backends] [--task_dir TASK_DIR] [--task TASK] [--workload WORKLOAD] [--report_dir REPORT_DIR] [--numa NUMA]
-                 [--device DEVICE] [--node_world_size NODE_WORLD_SIZE] [--node_rank NODE_RANK] [--server_port SERVER_PORT] [--master_addr MASTER_ADDR] [--host_port HOST_PORT]
-                 [--device_port DEVICE_PORT] [--enable_profiling] [--log_level LOG_LEVEL]
+#### 2.2 Usages
+```bash
+usage: launch.py [-h] [--backend {INTEL,GPU,MUSA,MLU,ROCM,NPU}] [--numa NUMA] [--device DEVICE] [--node_world_size NODE_WORLD_SIZE] [--node_rank NODE_RANK] [--master_addr MASTER_ADDR] [--server_port SERVER_PORT] [--host_port HOST_PORT]
+                 [--device_port DEVICE_PORT] [--task_dir TASK_DIR] [--task TASK] [--workload WORKLOAD] [--report_dir REPORT_DIR]
 
 optional arguments:
   -h, --help            show this help message and exit
-  --backend {GPU}
+  --backend {INTEL,GPU,MUSA,MLU,ROCM,NPU}
                         Backend to use, default is GPU
-  --show_backends       Show supported backends
-  --task_dir TASK_DIR   Task directory, default is workloads/basic
-  --task TASK           Task to bench, default is all
-  --workload WORKLOAD   Workload to bench, suppor jsonl or csv format. default is None which use **task.json** or **task.csv** in **task_dir**
-  --report_dir REPORT_DIR
-                        Report directory, default is reports
-  --numa NUMA           Numa config. Default is None which create **num_numa_nodes** processes to bench, each of them run on one numa node and schedule some devices. Values '-1' or '0' or '1'
-                        mean creating one process and specifing all numa nodes or node 0 or node 1. Value '0,1' means creating 2 processes and assign node 0 and node 1 to them respectively.
+  --numa NUMA           Numa config. Default is None which create **num_numa_nodes** processes to bench, each of them run on one numa node and schedule some devices. Values '-1' or '0' or '1' mean creating one process and specifing all numa nodes or node 0 or
+                        node 1. Value '0,1' means creating 2 processes and assign node 0 and node 1 to them respectively.
   --device DEVICE       Device config.Default is None which use all devices on current machine.Value '0,1' means using device 0 and device 1 on current machine.
   --node_world_size NODE_WORLD_SIZE
                         Node world size, default is 1
   --node_rank NODE_RANK
                         Node rank, default is 0
-  --server_port SERVER_PORT
-                        Server port, default is 49372
   --master_addr MASTER_ADDR
-                        Master address, default is localhost
+  --server_port SERVER_PORT
   --host_port HOST_PORT
-                        Host port, default is 49373
   --device_port DEVICE_PORT
-                        Device port, default is 49374
-  --enable_profiling    Enable profiling, default is False
-  --log_level LOG_LEVEL
+  --task_dir TASK_DIR
+  --task TASK
+  --workload WORKLOAD
+  --report_dir REPORT_DIR
 ```
 
-### Expected Output
+### 3. A quick start for remote bench
+#### 3.1 Commands
+```bash
+# Start bench server with default configs
+python3 ./server.py --backend GPU
+
+# Send bench request with default configs
+# Bench add/all_reduce ops with default workloads under workloads/basic
+python3 ./client --task add,all_reduce
+```
+
+#### 3.2 Usages for server
+```bash
+usage: server.py [-h] [--backend {INTEL,GPU,MUSA,MLU,ROCM,NPU}] [--numa NUMA] [--device DEVICE]
+                 [--node_world_size NODE_WORLD_SIZE] [--node_rank NODE_RANK] [--master_addr MASTER_ADDR]
+                 [--server_port SERVER_PORT] [--host_port HOST_PORT] [--device_port DEVICE_PORT]
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --backend {INTEL,GPU,MUSA,MLU,ROCM,NPU}
+                        Backend to use, default is GPU
+  --numa NUMA           Numa config. Default is None which create **num_numa_nodes** processes to bench, each of
+                        them run on one numa node and schedule some devices. Values '-1' or '0' or '1' mean
+                        creating one process and specifing all numa nodes or node 0 or node 1. Value '0,1' means
+                        creating 2 processes and assign node 0 and node 1 to them respectively.
+  --device DEVICE       Device config.Default is None which use all devices on current machine.Value '0,1' means
+                        using device 0 and device 1 on current machine.
+  --node_world_size NODE_WORLD_SIZE
+                        Node world size, default is 1
+  --node_rank NODE_RANK
+                        Node rank, default is 0
+  --master_addr MASTER_ADDR
+  --server_port SERVER_PORT
+  --host_port HOST_PORT
+  --device_port DEVICE_PORT
+```
+
+### 3.3 Usages for client
+```bash
+usage: client.py [-h] [--task_dir TASK_DIR] [--task TASK] [--workload WORKLOAD] [--report_dir REPORT_DIR]
+                 [--server_ip SERVER_IP] [--server_port SERVER_PORT]
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --task_dir TASK_DIR
+  --task TASK
+  --workload WORKLOAD
+  --report_dir REPORT_DIR
+  --server_ip SERVER_IP
+  --server_port SERVER_PORT
+```
+
+
+
+
+
+## Expected Output
+By default, reports are saved in the reports/ directory, and the specific parameters and performance metrics of the current test operator will also be printed to the terminal.
+
 For different types of operators (Compute-bound / Memory-bound), we adopt various metrics to comprehensively evaluate the performance of the operator. Regarding the various metrics, the explanations are as follows:
 
 ### for computation ops
@@ -140,4 +191,4 @@ Example:
 ```
 
 ## Trouble Shooting
-For more details, you can visit our offical website here: [bytemlperf.ai](https://bytemlperf.ai/). Please let us know if you need any help or have additional questions and issues!
+For more details, you can visit our offical website here: [xpu-perf.ai](https://xpu-perf.ai/). Please let us know if you need any help or have additional questions and issues!

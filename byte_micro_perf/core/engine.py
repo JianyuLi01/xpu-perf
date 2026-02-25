@@ -1,9 +1,10 @@
 import os
 import sys
+import time
 import pathlib
 import traceback
-import prettytable
-from typing import List, Dict, Any
+import threading
+from typing import List, Dict, Any, Optional
 from datetime import timedelta
 from abc import ABC, abstractmethod
 
@@ -35,8 +36,6 @@ class BaseEngine(ABC):
 
         self.numa_configs = self.backend_instance.common_info["numa_configs"]
 
-
-        # 获取当前的并行方式
         self.node_world_size = args_dict.get("node_world_size", 1)
         self.node_rank = args_dict.get("node_rank", 0)
 
@@ -77,8 +76,11 @@ class BaseEngine(ABC):
                 "numa_id": numa_id,
                 "numa_cores": numa_cores,
             })
-        
-        # 进程和进程号
+
+        self.is_running = False
+
+        self.dispatch_lock = threading.Lock()
+
         self.subprocess_procs = []
         self.subprocess_pids = []
 
@@ -111,37 +113,32 @@ class BaseEngine(ABC):
     def stop(self):
         raise NotImplementedError
 
-    def dispatch(self, tasks: Dict[str, List[Dict[str, Any]]]):
-        task_idx = 0
-        for task_info, task_cases in tasks.items():
-            logger.info(f"dispatch task {task_info} with {len(task_cases)} test cases")
-            for test_case in task_cases:
-                self.input_queue.put((task_idx, task_info, test_case))
-                task_idx += 1
+    def dispatch(self, test_cases): 
+        index_mapping = {}
+        with self.dispatch_lock:
+            task_idx = 0
+            for op_name, cases in test_cases.items():
+                index_mapping[op_name] = []
+                for case in cases:
+                    case_mapping = {}
+                    for op_provider, op_provider_info in self.backend_instance.op_mapping[op_name].items():
+                        op_cls = op_provider_info["op_cls"]
+                        case_mapping[op_provider] = task_idx
+                        self.input_queue.put((task_idx, (op_name, op_provider, op_cls), case))
+                        task_idx += 1
+                    index_mapping[op_name].append(case_mapping)
 
-        all_results = {}
-        for _ in range(task_idx):
-            result_idx, result_dict = self.output_queue.get()
-            if result_dict:
+            all_results = {}
+            for _ in range(task_idx):
+                result_idx, result_dict = self.output_queue.get()
                 all_results[result_idx] = result_dict
 
-        results = {}
-        sort_idx = 0
-        for task_info, task_cases in tasks.items():
-            cur_task_results = []
-            for test_case in task_cases:
-                if sort_idx not in all_results:
-                    logger.error(f"missing result for task_info {task_info} test case {test_case}")
-                else:
-                    cur_task_results.append(all_results[sort_idx])
-                sort_idx += 1
-
-            if cur_task_results:
-                results[task_info] = cur_task_results    
-
-        return results
-
-
+            for op_name in index_mapping:
+                for case_mapping in index_mapping[op_name]:
+                    for op_provider, index in case_mapping.items():
+                        case_mapping[op_provider] = all_results.get(index, {})
+        
+        return index_mapping
 
 
 class ComputeEngine(BaseEngine):
@@ -176,6 +173,7 @@ class ComputeEngine(BaseEngine):
                     logger.error(f"compute infer loop timeout, error: {e}")
                     sys.exit(-1)
 
+            self.is_running = True
             logger.info(f"all subprocesses are ready")
 
         except Exception as e:
@@ -203,6 +201,8 @@ class ComputeEngine(BaseEngine):
 
             self.subprocess_procs = []
             self.subprocess_pids = []
+        
+        self.is_running = False
 
 
 class XCCLEngine(BaseEngine):
@@ -212,8 +212,25 @@ class XCCLEngine(BaseEngine):
         os.environ["MASTER_ADDR"] = str(self.master_addr)
         os.environ["MASTER_PORT"] = str(self.device_port)
 
-        self.node_world_size = args_dict["node_world_size"]
-        self.node_rank = args_dict["node_rank"]
+        self.heartbeat_thread: Optional[threading.Thread] = None
+        self.heartbeat_task_id = 0
+        self.timeout = args_dict.get("timeout", 60)
+        self.last_dispatch_time = time.time()
+
+        
+        self.xccl_world_size = self.node_world_size * self.device_num
+        self.demo_test_case = {
+            "all_reduce": [{
+                "arg_type": "default", 
+                "world_size": self.xccl_world_size, 
+                "dtype": "float32", 
+                "batch_size": 1, 
+                "dim_size": 1024
+            }],
+        }
+
+
+
 
     def start(self):
         # 创建子进程, 由一个子进程汇报状态
@@ -238,7 +255,7 @@ class XCCLEngine(BaseEngine):
             logger.info(f"spawn xccl infer loop success, pids: {self.subprocess_pids}")
 
             try:
-                signal = self.output_queue.get(timeout=30)
+                signal = self.output_queue.get(timeout=60)
                 if signal != "success":
                     logger.error(f"xccl infer loop failed, signal: {signal}")
                     sys.exit(-1)
@@ -246,13 +263,35 @@ class XCCLEngine(BaseEngine):
                 logger.error(f"xccl infer loop timeout, error: {e}")
                 sys.exit(-1)
 
+            self.is_running = True
+            self.last_dispatch_time = time.time()
+            self.heartbeat_thread = threading.Thread(
+                target=self._heartbeat_monitor,
+                daemon=True,  # 主进程退出时自动终止
+                name="HeartbeatMonitor"
+            )
+            self.heartbeat_thread.start()
+
             logger.info(f"all subprocesses are ready")
 
         except Exception as e:
             logger.exception(f"failed to spawn xccl infer loop: {e}")
             traceback.print_exc()
             sys.exit(-1)
-            
+
+    def _heartbeat_monitor(self):
+        while self.is_running:
+            try:
+                elapsed = time.time() - self.last_dispatch_time
+                if elapsed > self.timeout:
+                    logger.info(f"heartbeat...")
+                    self.dispatch(self.demo_test_case)
+                    self.last_dispatch_time = time.time()
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"heartbeat monitor failed, error: {e}")
+                time.sleep(2)
+                
 
     def stop(self):
         if self.subprocess_procs:
@@ -272,6 +311,8 @@ class XCCLEngine(BaseEngine):
 
             self.subprocess_procs = []
             self.subprocess_pids = []
+        
+        self.is_running = False
             
 
 class P2PEngine(BaseEngine):

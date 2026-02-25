@@ -1,31 +1,39 @@
 import os
 import sys
+import signal
 import pathlib
 import argparse
+import threading
+import traceback
 import importlib
 import prettytable
+
+import torch
+import torch.multiprocessing as mp
+
+from flask import Flask, request, jsonify
 
 FILE_DIR = pathlib.Path(__file__).parent.absolute()
 BYTE_MLPERF_ROOT = FILE_DIR
 BACKENDS_DIR = BYTE_MLPERF_ROOT.joinpath("backends")
 sys.path.insert(0, str(BYTE_MLPERF_ROOT))
 
-import torch
-import torch.multiprocessing as mp
-
 from core.utils import logger, setup_logger
-from core.backend import OP_ENGINE_MAPPING
 from perf_engine import XpuPerfServer
-from client import parse_tasks, parse_workload, parse_replay_tasks, export_reports
+
+
+mp.set_start_method('spawn', force=True)
+g_server_instance = None
+g_app_instance = None
+
 
 
 def parse_args():
-    mp.set_start_method('spawn', force=True)
     setup_logger("INFO")
-
     if not BACKENDS_DIR.exists():
         logger.error(f"Backends directory {BACKENDS_DIR} not found")
         return 1
+    
     backend_list = []
     for backend_dir in BACKENDS_DIR.iterdir():
         if backend_dir.is_dir():
@@ -33,9 +41,6 @@ def parse_args():
 
     parser = argparse.ArgumentParser()
     
-    """
-    Engine Arguments
-    """
     # backend config
     parser.add_argument(
         "--backend", type=str, default="GPU", choices=backend_list, 
@@ -75,28 +80,9 @@ def parse_args():
     parser.add_argument("--server_port", type=int, default=49371)
     parser.add_argument("--host_port", type=int, default=49372)
     parser.add_argument("--device_port", type=int, default=49373)
-
-
-    """
-    Bench Arguments
-    """
-    parser.add_argument
-
-    # task input
-    parser.add_argument("--task_dir", type=str, 
-        default=str(BYTE_MLPERF_ROOT.joinpath("workloads", "basic")))
-    parser.add_argument("--task", type=str, default="all")
-    parser.add_argument("--workload", type=str)
-
-    # report output
-    parser.add_argument("--report_dir", type=str, 
-        default=str(BYTE_MLPERF_ROOT.joinpath("reports")))
     
-    
-    """
-    Check and prepare engine arguments
-    """
     args = parser.parse_args()
+
 
     # backend
     if args.backend not in backend_list:
@@ -116,8 +102,7 @@ def parse_args():
     except Exception as e:
         logger.error(f"Failed to import backend {args.backend}: {e}")
         return 1
-
-
+    
     # 获取系统基本信息
     common_pt = prettytable.PrettyTable()
     common_pt.field_names = ["attr", "value"]
@@ -169,7 +154,6 @@ def parse_args():
     device_mapping = list(range(backend_instance.backend_info["device_count"]))
     logger.info(f"use {numa_num} numa nodes, numa_order: {numa_order}, mapping to {device_mapping}")
 
-
     # 解析 node dist config
     node_world_size = args.node_world_size
     node_rank = args.node_rank
@@ -189,7 +173,7 @@ def parse_args():
         for id in device_ids:
             if id not in device_mapping:
                 logger.error(f"Invalid device id: {id}, not in {device_mapping}")
-                return 1    
+                return 1
     logger.info(f"using devices: {device_ids}")
 
     # 解析 serving config
@@ -206,7 +190,7 @@ def parse_args():
     server_pt.add_row(["host_port", host_port, "port for host communication."])
     server_pt.add_row(["device_port", device_port, "port for device communication."])
     logger.info(f"serving config: \n{server_pt}")
-
+    
     return {
         "backend_instance": backend_instance,
 
@@ -224,43 +208,43 @@ def parse_args():
         "server_port": server_port,
         "host_port": host_port,
         "device_port": device_port
-    }, args
+    }
 
 
 
-if __name__ == "__main__":
-    engine_args_dict, args = parse_args()
+if __name__ == '__main__':
+    args_dict = parse_args()
+    server_instance = XpuPerfServer(args_dict)
+    server_instance.create()
+    g_server_instance = server_instance
 
-    # get bench tasks
-    test_cases = {}
-    if args.workload is not None:
-        test_cases = parse_workload(args.workload)
-    else:
-        test_cases = parse_tasks(args.task_dir, args.task)
-    if not test_cases:
-        logger.error("No valid test cases found. Exiting.")
-        sys.exit(1)
-    print("*" * 100)
-    logger.info(f"test cases: ")
-    for op_name, op_cases in test_cases.items():
-        logger.info(f"{op_name} has {len(op_cases)} test cases")
-    print("*" * 100)
 
-    # check started engines
-    engine_set = set()
-    for op_name, op_cases in test_cases.items():
-        if op_name not in OP_ENGINE_MAPPING:
-            continue
-        engine_name = OP_ENGINE_MAPPING[op_name]
-        engine_set.add(engine_name)
+    app_instance = Flask("XpuPerfServer")
+    g_app_instance = app_instance
 
-    with XpuPerfServer(engine_args_dict, required_engines=engine_set) as server_instance:
-        info_dict = server_instance.get_info()
-        bench_results = server_instance.normal_bench(test_cases)
-        export_reports(
-            args.report_dir, 
-            info_dict, 
-            test_cases, 
-            bench_results
-        )
-    
+    @app_instance.route("/info", methods=["GET"])
+    def info():
+        try:
+            info_dict = server_instance.get_info()
+            return jsonify(info_dict)
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    @app_instance.route("/bench", methods=["POST"])
+    def bench():
+        try:
+            input_dict = request.json
+            result_dict = server_instance.bench(input_dict)
+            return jsonify(result_dict)
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    app_instance.run(
+        host=args_dict["master_addr"],
+        port=args_dict["server_port"],
+        debug=False, 
+        use_reloader=False,
+        threaded=True
+    )
+
+    server_instance.destroy()
