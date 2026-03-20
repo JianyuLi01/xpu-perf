@@ -25,13 +25,7 @@ from model_zoo import BASE_MODEL_MAPPING
 
 
 # rename device name
-device_name_mapping = {
-    "MTT S5000": {
-        "formatted_name": "S5000", 
-        "die_num_per_card": 1, 
-        "extra_info": "S5000, x86_64, 单机8DIE"
-    }
-}
+device_name_mapping = {}
 
 
 CWD_DIR = pathlib.Path.cwd().absolute()
