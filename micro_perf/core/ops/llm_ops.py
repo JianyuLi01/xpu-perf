@@ -52,7 +52,7 @@ class ScaleDynamicQuantOp(BasicOp):
 
 
     def vendor_parser(self):
-        if self.dtype == "bfloat16" \
+        if self.dtype in ("bfloat16", "float16") \
             and self.dst_dtype == "int8":
             pass
         else:
