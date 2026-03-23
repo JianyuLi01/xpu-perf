@@ -40,7 +40,7 @@ SUPPORTED_OPS = {
         "broadcast", 
         "p2p", 
 
-        "all_reduce_h2d", 
+        #"all_reduce_h2d",
 
         "host2device", 
         "device2host", 
@@ -98,6 +98,7 @@ SUPPORTED_OPS = {
         "moe_softmax_topk",
         "moe_scatter_dynamic_quant",
         "quant_matmul",
+        "moe_quant_matmul",
         "quant_group_gemm_reduce_sum",
         "moe_quant_group_gemm",
         "moe_quant_group_gemm_combine",
@@ -110,8 +111,11 @@ SUPPORTED_OPS = {
         "head_rms_norm_dynamic_quant",
         "rotary_embedding",
         "store_kv_cache",
+        "store_paged_kv_cache",
         "dequant_kv_cache",
         "flash_attention",
+        "sage_attention_page",
+        "sage_attention_decode_page",
     ]
 }
 

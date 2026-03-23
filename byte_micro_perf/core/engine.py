@@ -165,7 +165,7 @@ class ComputeEngine(BaseEngine):
 
             for _ in range(self.device_num):
                 try:
-                    signal = self.output_queue.get(timeout=30)
+                    signal = self.output_queue.get(timeout=120)
                     if signal != "success":
                         logger.error(f"compute infer loop failed, signal: {signal}")
                         sys.exit(-1)

@@ -1,0 +1,419 @@
+import sys
+import os
+import re
+import math
+import pathlib
+import subprocess
+from functools import partial
+import torch
+import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention.bias import causal_lower_right
+
+sys.path.insert(
+    0, 
+    str(pathlib.Path(__file__).absolute().parents[3])
+)
+
+from core.ops.llm_ops import FlashAttentionOp
+from core.utils import OpTensorInfo, calc_tensor_size
+
+OP_MAPPING = {}
+
+
+try:
+    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+
+    # https://github.com/Dao-AILab/flash-attention
+    class FA2Op(FlashAttentionOp):
+        def __init__(self, args_dict, backend, *args, **kwargs):
+            super().__init__(args_dict, backend, *args, **kwargs)
+
+            if self.attn_mode == "prefill":
+                self.prefill_init()
+            elif self.attn_mode == "decode":
+                self.decode_init()
+
+        def prefill_init(self):
+            if not (
+                self.dtype == "bfloat16" and 
+                self.compute_dtype == "bfloat16" and 
+                self.cache_dtype == "bfloat16"    
+            ):
+                raise ValueError(
+                    "FlashAttentionOp only support bfloat16 dtype and compute_dtype and cache_dtype"
+                )
+
+            if not(
+                self.cache_type == "linear"
+            ):
+                raise ValueError(
+                    "FlashAttentionOp only support linear cache_type"
+                )
+
+            if not (
+                self.batch_size == 1 and 
+                self.cache_lens[0] == 0
+            ):
+                raise ValueError(
+                    "FlashAttentionOp only support prefill with batch_size == 1 and cache_len == 0"
+                )
+            
+            self._run_func = self.prefill_run
+
+
+        def prefill_run(self, tensor_mapping):
+            q = tensor_mapping["q"].view(self.batch_size, self.num_tokens, self.q_head_num, self.head_dim)
+            # k_cache/v_cache from base class are [B, H, S, D] (BHSD, contiguous).
+            # fwd() auto-detects BHSD layout (H < S and nheads % H == 0),
+            # so pass directly — no view/transpose needed.
+            k_cache = tensor_mapping["k_cache"].view(self.batch_size, self.num_tokens, self.kv_head_num, self.head_dim)
+            v_cache = tensor_mapping["v_cache"].view(self.batch_size, self.num_tokens, self.kv_head_num, self.head_dim)
+            out = flash_attn_func(
+                q,
+                k_cache, v_cache,
+                causal=self.is_causal
+            )
+            return out
+            
+
+
+        def decode_init(self):
+            if not (
+                self.dtype == "bfloat16" and 
+                self.compute_dtype == "bfloat16" and 
+                self.cache_dtype == "bfloat16"
+            ):
+                raise ValueError(
+                    "FlashAttentionOp only support bfloat16 dtype and compute_dtype and cache_dtype"
+                )
+            
+            if not(
+                self.cache_type == "linear"
+            ):
+                raise ValueError(
+                    "FlashAttentionOp only support linear cache_type"
+                )
+            
+            self._run_func = self.decode_run
+
+
+        def decode_run(self, tensor_mapping):
+            q = tensor_mapping["q"].view(self.batch_size, self.max_q_len, self.q_head_num, self.head_dim)
+            kv_lens = tensor_mapping["kv_lens"]
+
+            # k_cache/v_cache from base class are [B, H, S, D] (BHSD, contiguous).
+            # fwd_kvcache auto-detects BHSD layout (H < S and nheads % H == 0),
+            # so no transpose is needed — contiguous memory access for SDPA.
+            k_cache = tensor_mapping["k_cache"]
+            v_cache = tensor_mapping["v_cache"]
+
+            out = flash_attn_with_kvcache(
+                q, 
+                k_cache, v_cache, 
+                cache_seqlens=kv_lens, 
+                causal=self.is_causal
+            )
+            
+            return out
+
+
+    OP_MAPPING["flash_attn_v2"] = FA2Op
+except:
+    pass
+
+
+
+try:
+    from flash_attn_interface import flash_attn_func, flash_attn_with_kvcache
+
+    class FA3Op(FA2Op):
+        def __init__(self, args_dict, backend, *args, **kwargs):
+            super().__init__(args_dict, backend, *args, **kwargs)
+
+    OP_MAPPING["flash_attn_v3"] = FA3Op
+except:
+    pass
+
+
+# Fallback: PyTorch SDPA-based flash attention (no flash_attn library needed)
+try:
+    class FlashAttentionXpuOp(FlashAttentionOp):
+        def __init__(self, args_dict, backend, *args, **kwargs):
+            super().__init__(args_dict, backend, *args, **kwargs)
+            self.extra_providers = ["sdpa_flash_attention"]
+
+            self.q_seq_len = args_dict.get("q_len", 1024)
+            self.cache_len = args_dict.get("cache_len", 0)
+            self.kv_seq_len = self.cache_len + self.q_seq_len
+            self.head_dim = args_dict.get("head_dim", 128)
+            self.num_head_q = args_dict.get("q_head_num", 96)
+            self.num_head_kv = args_dict.get("kv_head_num", 8)
+            self.prefix_len = self.cache_len if self.q_seq_len > 1 and self.cache_len != 0 else None
+            self.scale = float(1.0 / math.sqrt(self.head_dim))
+            self.is_causal = self.q_seq_len == self.kv_seq_len
+
+        def prepare(self):
+            self.arg_type = self.args_dict["arg_type"]
+            if self.arg_type not in ["llm"]:
+                raise NotImplementedError
+
+            self.dtype = self.args_dict.get("dtype", "float16")
+            self.cache_dtype = self.args_dict["cache_dtype"]
+            if self.dtype not in ["float16", "bfloat16"]:
+                raise NotImplementedError
+            self.torch_dtype = getattr(torch, self.dtype)
+            self.cache_torch_dtype = getattr(torch, self.cache_dtype) if self.cache_dtype != "int8" else torch.int8
+
+            self.q_head_num = self.args_dict["q_head_num"]
+            self.kv_head_num = self.args_dict["kv_head_num"]
+            self.head_dim = self.args_dict["head_dim"]
+            self.batch_size = self.args_dict["batch_size"]
+            self.q_seq_len = self.args_dict["q_len"]
+            self.cache_len = self.args_dict["cache_len"]
+            self.kv_seq_len = self.cache_len + self.q_seq_len
+            self.is_causal = self.q_seq_len == self.kv_seq_len
+            self.prefix_len = self.cache_len if self.q_seq_len > 1 and self.cache_len != 0 else None
+            self.softmax_scale = self.head_dim ** (-0.5)
+
+            self.input_tensor_info = {
+                "q": OpTensorInfo(
+                    shape=[self.batch_size, self.q_seq_len, self.q_head_num, self.head_dim],
+                    dtype=self.torch_dtype,
+                    device=self.backend.get_torch_device_name()
+                ),
+                "k_cache": OpTensorInfo(
+                    shape=[self.batch_size, self.cache_len, self.kv_head_num, self.head_dim],
+                    dtype=self.cache_torch_dtype,
+                    device=self.backend.get_torch_device_name()
+                ),
+                "k_new": OpTensorInfo(
+                    shape=[self.batch_size, self.q_seq_len, self.kv_head_num, self.head_dim],
+                    dtype=self.torch_dtype,
+                    device=self.backend.get_torch_device_name()
+                ),
+                "v_cache": OpTensorInfo(
+                    shape=[self.batch_size, self.cache_len, self.kv_head_num, self.head_dim],
+                    dtype=self.cache_torch_dtype,
+                    device=self.backend.get_torch_device_name()
+                ),
+                "v_new": OpTensorInfo(
+                    shape=[self.batch_size, self.q_seq_len, self.kv_head_num, self.head_dim],
+                    dtype=self.torch_dtype,
+                    device=self.backend.get_torch_device_name()
+                )
+            }
+
+            self.output_tensor_info = {
+                "out": OpTensorInfo(
+                    shape=[self.batch_size, self.q_seq_len, self.q_head_num, self.head_dim],
+                    dtype=self.torch_dtype,
+                    device=self.backend.get_torch_device_name()
+                )
+            }
+
+            self.input_tensor_size = sum([
+                calc_tensor_size(info) for info in self.input_tensor_info.values()
+            ])
+            self.output_tensor_size = sum([
+                calc_tensor_size(info) for info in self.output_tensor_info.values()
+            ])
+            self.tensor_size = self.input_tensor_size + self.output_tensor_size
+
+            self.read_bytes = self.input_tensor_size
+            self.write_bytes = self.output_tensor_size
+            self.io_bytes = self.read_bytes + self.write_bytes
+
+            self.calc_flops = 0
+            for idx in range(self.batch_size):
+                q_len = self.q_seq_len
+                kv_len = self.kv_seq_len
+
+                gemm_flops = self.q_head_num * q_len * self.head_dim * kv_len * 2
+
+                if self.prefix_len is not None:
+                    decode_kv_len = kv_len - self.prefix_len
+                    decode_q_len = min(q_len, decode_kv_len)
+                    total_valid_flops = q_len * self.prefix_len + (decode_q_len * decode_kv_len - decode_q_len * decode_q_len / 2)
+                    flops_ratio = total_valid_flops / (q_len * kv_len) if (q_len * kv_len) > 0 else 1.
+                elif self.is_causal:
+                    flops_ratio = (q_len * kv_len - q_len * q_len / 2) / (q_len * kv_len)
+                else:
+                    flops_ratio = 1.
+
+                # QK^T + PV = 2x gemm
+                self.calc_flops += gemm_flops * 2 * flops_ratio
+
+            self._create_tensors_func = partial(
+                self._create_in_out_tensors,
+                create_inputs=True,
+                create_outputs=True,
+            )
+
+            self._run_func = self.flash_attention_run
+
+        def flash_attention_run(self, tensor_mapping):
+            q = tensor_mapping["q"]
+            k_cache = tensor_mapping["k_cache"]
+            k_new = tensor_mapping["k_new"]
+            v_cache = tensor_mapping["v_cache"]
+            v_new = tensor_mapping["v_new"]
+
+            k = torch.cat([k_cache, k_new], dim=1)
+            v = torch.cat([v_cache, v_new], dim=1)
+
+            q = q.transpose(1, 2)  # [batch, q_head_num, q_seq_len, head_dim]
+            k = k.transpose(1, 2)  # [batch, kv_head_num, kv_seq_len, head_dim]
+            v = v.transpose(1, 2)
+
+            attn_mask = None
+            if self.prefix_len is not None:
+                attn_mask = causal_lower_right(self.q_seq_len, self.kv_seq_len)
+
+            with sdpa_kernel(backends=[SDPBackend.OVERRIDEABLE]):
+                out = F.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=attn_mask,
+                    is_causal=self.is_causal if attn_mask is None else False,
+                    scale=self.scale,
+                    enable_gqa=True
+                )
+
+            tensor_mapping["out"] = out
+            return out
+
+    OP_MAPPING["xpu_flash_attention"] = FlashAttentionXpuOp
+except:
+    pass
+
+
+# sycl-tla flash attention via pre-built C++ binary
+try:
+    # Resolve sycl-tla path relative to xpu-perf root (xpu-perf/../sycl-tla)
+    # flash_attention.py -> ops -> INTEL -> backends -> byte_micro_perf -> xpu-perf
+    _XPU_PERF_ROOT = pathlib.Path(__file__).resolve().parents[4]
+    SYCL_TLA_DIR = str(_XPU_PERF_ROOT.parent / "sycl-tla")
+    SYCL_TLA_BUILD_DIR = os.path.join(
+        SYCL_TLA_DIR, "build/examples/06_bmg_flash_attention"
+    )
+
+    if not os.path.isdir(SYCL_TLA_BUILD_DIR):
+        print(
+            f"[WARNING] sycl-tla build dir not found at {SYCL_TLA_BUILD_DIR}. "
+            f"sycl_tla_flash_attention provider will NOT be available. "
+            f"Expected sycl-tla repo at {SYCL_TLA_DIR} (sibling of {_XPU_PERF_ROOT})."
+        )
+        raise FileNotFoundError(SYCL_TLA_BUILD_DIR)
+
+    class SyclTlaFAOp(FlashAttentionOp):
+        # Supported head dims per the sycl-tla CMakeLists.txt
+        SUPPORTED_HDIMS = [64, 96, 128, 192]
+
+        # Dtype mapping from framework names to sycl-tla binary name components
+        DTYPE_MAP = {
+            "bfloat16": "bfloat16",
+            "float8": "float_e4m3",
+        }
+
+        def __init__(self, args_dict, backend, *args, **kwargs):
+            super().__init__(args_dict, backend, *args, **kwargs)
+
+            if self.head_dim not in self.SUPPORTED_HDIMS:
+                raise ValueError(
+                    f"SyclTlaFAOp only supports head_dim in {self.SUPPORTED_HDIMS}, got {self.head_dim}"
+                )
+
+            # Run sycl-tla binary and store parsed results
+            self._sycl_tla_result = self._run_sycl_tla()
+
+            # Override run to no-op; benchmarking was done by the binary
+            self._run_func = lambda tensor_mapping: None
+            self._create_tensors_func = lambda instance_num: [{}] * max(instance_num, 1)
+
+        def _get_binary_path(self):
+            binary_dtype = self.DTYPE_MAP.get(self.cache_dtype, "bfloat16")
+            binary_name = (
+                f"06_xe_fmha_fwd_{self.attn_mode}_{binary_dtype}_t_hdim{self.head_dim}"
+            )
+            return os.path.join(SYCL_TLA_BUILD_DIR, binary_name)
+
+        def _run_sycl_tla(self):
+            binary_path = self._get_binary_path()
+            if not os.path.isfile(binary_path):
+                raise FileNotFoundError(f"sycl-tla binary not found: {binary_path}")
+
+            if self.attn_mode == "prefill":
+                # Prefill: q and kv have the same sequence length per batch element
+                seq_qo = self.q_lens[0]
+                seq_kv = self.kv_lens[0]
+                cmd = (
+                    f"{binary_path} "
+                    f"--iterations=100 --batch={self.batch_size} --verify=0 "
+                    f"--num_heads_q={self.q_head_num} --num_heads_kv={self.kv_head_num} "
+                    f"--head_size_qk={self.head_dim} --head_size_vo={self.head_dim} "
+                    f"--seq_len_qo={seq_qo} --seq_len_kv={seq_kv}"
+                )
+            elif self.attn_mode == "decode":
+                # Decode: small q_len (new tokens), large kv_cache (previously cached)
+                seq_qo = self.max_q_len
+                seq_kv = self.max_q_len  # new KV tokens = new query tokens
+                cache_len = self.max_cache_len
+                cmd = (
+                    f"{binary_path} "
+                    f"--iterations=100 --batch={self.batch_size} --verify=0 "
+                    f"--num_heads_q={self.q_head_num} --num_heads_kv={self.kv_head_num} "
+                    f"--head_size_qk={self.head_dim} --head_size_vo={self.head_dim} "
+                    f"--seq_len_qo={seq_qo} --seq_len_kv={seq_kv} "
+                    f"--seq_len_kv_cache={cache_len}"
+                )
+            else:
+                raise ValueError(f"Unsupported attn_mode: {self.attn_mode}")
+
+            if self.is_causal:
+                cmd += " --is_causal"
+
+            print(f"[SyclTlaFAOp] Running: {cmd}")
+
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                executable="/bin/bash",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=300,
+                start_new_session=True,
+                close_fds=True,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"sycl-tla binary failed (rc={result.returncode}):\n{result.stdout}"
+                )
+
+            print(f"[SyclTlaFAOp] Output:\n{result.stdout}")
+
+            perf_match = re.search(
+                r"Performance:\s+([\d\.]+)\s+GB/s,\s+([\d\.]+)\s+TFlop/s,\s+([\d\.]+)\s+ms",
+                result.stdout,
+            )
+            if not perf_match:
+                raise RuntimeError(
+                    f"Failed to parse sycl-tla output:\n{result.stdout}"
+                )
+
+            return {
+                "gb_s": float(perf_match.group(1)),
+                "tflops": float(perf_match.group(2)),
+                "latency_ms": float(perf_match.group(3)),
+            }
+
+        def summary(self, latency_us, kernel_mapping={}):
+            if self._sycl_tla_result:
+                latency_us = self._sycl_tla_result["latency_ms"] * 1000.0
+            return super().summary(latency_us, kernel_mapping)
+
+    OP_MAPPING["sycl_tla_flash_attention"] = SyclTlaFAOp
+except Exception as e:
+    print(f"[SyclTlaFAOp] Failed to register: {e}")
+    pass

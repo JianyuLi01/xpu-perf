@@ -56,7 +56,10 @@ class XpuPerfServer:
     def destroy(self):
         for engine_name, engine_instance in self.started_engines.items():
             engine_instance.stop()
-        self.backend_instance.clean_extra_files()
+        try:
+          self.backend_instance.clean_extra_files()
+        except:
+          pass
 
 
     def get_info(self):

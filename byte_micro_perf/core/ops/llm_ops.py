@@ -60,7 +60,7 @@ class ScaleDynamicQuantOp(BasicOp):
 
         # src_dtype
         self.dtype = self.args_dict["dtype"]
-        src_avail_dtype = ["bfloat16"]
+        src_avail_dtype = ["float16", "bfloat16"]
         if not self.dtype in src_avail_dtype:
             raise ValueError(f"dtype {self.dtype} is not supported")
         self.torch_dtype = get_torch_dtype(self.dtype)
