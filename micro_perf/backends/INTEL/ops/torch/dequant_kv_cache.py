@@ -4,7 +4,7 @@ from functools import partial
 
 sys.path.insert(
     0, 
-    str(pathlib.Path(__file__).absolute().parents[3])
+    str(pathlib.Path(__file__).absolute().parents[4])
 )
 
 from core.op import BasicOp

@@ -3,23 +3,25 @@ import pathlib
 from functools import partial
 import torch
 sys.path.insert(
-    0, 
-    str(pathlib.Path(__file__).absolute().parents[3])
+    0,
+    str(pathlib.Path(__file__).absolute().parents[4])
 )
 import math
 
+from core.op import ProviderRegistry
 from core.ops.llm_ops import FlashAttentionOp
 from core.utils import OpTensorInfo, calc_tensor_size
 
-OP_MAPPING = {}
-
 
 try:
+    torch.ops.torch_ipex.sage_attn_paged
+
+    @ProviderRegistry.register_vendor_impl("sage_attn", "ipex")
     class SAOp(FlashAttentionOp):
         def __init__(self, args_dict, backend, *args, **kwargs):
             super().__init__(args_dict, backend, *args, **kwargs)
             self.extra_providers = ["sage_attn_paged_intel"]
-            
+
             self.mode = args_dict.get("attn_mode", args_dict.get("mode", "prefill"))
             self.batch_size = args_dict.get("batch_size", 1)
             self.q_seq_len = args_dict.get("q_len", args_dict.get("q_seq_len", 1024))
@@ -33,22 +35,22 @@ try:
 
 
             self.dtype = args_dict.get("dtype", torch.bfloat16)
-            
+
             self.scale = float(1.0 / math.sqrt(self.head_dim))
-            
+
             self.max_seqlen_q = self.q_seq_len if isinstance(self.q_seq_len, int) else max(self.q_seq_len)
             self.max_seqlen_k = self.kv_seq_len if isinstance(self.kv_seq_len, int) else max(self.kv_seq_len)
 
             assert self.batch_size == 1, \
                 f"batch_size ({self.batch_size}) only support 1"
-            
+
             self.cu_seqlen_q = self._compute_cu_seqlen(self.batch_size, self.q_seq_len)
             self.cu_seqlen_k = self._compute_cu_seqlen(self.batch_size, self.kv_seq_len)
-            
+
             self.block_size = args_dict.get("block_size", 128)
 
             self.block_tables = self._generate_block_tables(self.batch_size, self.kv_seq_len, self.block_size)
-            
+
             self.cu_seqlen_q = self.cu_seqlen_q.to(self.backend.get_torch_device_name())
             self.cu_seqlen_k = self.cu_seqlen_k.to(self.backend.get_torch_device_name())
             self.block_tables = self.block_tables.to(self.backend.get_torch_device_name())
@@ -60,17 +62,17 @@ try:
             else:
                 self.seq_lens = torch.tensor(self.kv_seq_len, dtype=torch.int32,
                                              device=self.backend.get_torch_device_name())
-            
+
             self.alibi_slopes = None
-            
+
             self.is_causal = args_dict.get("is_causal", self.mode == "decode")
 
         def prepare(self):
-        
+
             self.arg_type = self.args_dict["arg_type"]
             if self.arg_type not in ["llm"]:
                 raise NotImplementedError
-            
+
             self.dtype = self.args_dict.get("dtype", "float16")
             if self.dtype not in ["float16", "bfloat16"]:
                 raise NotImplementedError
@@ -79,25 +81,25 @@ try:
             self.is_causal = self.args_dict.get("is_causal", True)
             if not self.is_causal:
                 raise NotImplementedError
-            
+
             self.q_head_num = self.args_dict["q_head_num"]
-            self.kv_head_num = self.args_dict["kv_head_num"] 
+            self.kv_head_num = self.args_dict["kv_head_num"]
             self.head_dim = self.args_dict["head_dim"]
 
             self.batch_size = self.args_dict["batch_size"]
             self.q_seq_len = self.args_dict.get("q_len", self.args_dict.get("q_seq_len"))
-            
+
             self.kv_seq_len = self.args_dict.get("k_seq_len", self.q_seq_len)
-            
+
             self.softmax_scale = self.head_dim ** (-0.5)
-            
+
             self.block_size = self.args_dict["block_size"]
             self.num_blocks = (self.kv_seq_len + self.block_size - 1) // self.block_size
 
             if self.block_size != 512:
                 print("only support block_size 512")
                 raise NotImplementedError
-            
+
             self.input_tensor_info = {
                 "q": OpTensorInfo(
                     shape=[self.batch_size * self.q_seq_len, self.q_head_num, self.head_dim],
@@ -159,7 +161,7 @@ try:
 
             self.calc_flops = 0
             # here calc_flops are counted as int8 Tops
-        
+
             for idx in range(self.batch_size):
                 q_len = self.q_seq_len
                 kv_len = self.kv_seq_len
@@ -224,7 +226,7 @@ try:
                 create_inputs=True,
                 create_outputs=True,
             )
-            
+
             self._run_func = self.flash_attention_run
 
         def _compute_cu_seqlen(self, batch_size, seq_lens):
@@ -245,7 +247,7 @@ try:
             else:
                 raise NotImplementedError
 
-            max_blocks = (cache_lens[0] + block_size - 1) // block_size 
+            max_blocks = (cache_lens[0] + block_size - 1) // block_size
             block_tables = torch.zeros([batch_size, max_blocks], dtype=torch.int32)
             for i in range(batch_size):
                 block_table = []
@@ -298,6 +300,6 @@ try:
                 )
 
             return out
-    OP_MAPPING["sage_attn"] = SAOp
-except:
+
+except Exception:
     pass
