@@ -5,90 +5,14 @@ import torch
 import random
 sys.path.insert(
     0, 
-    str(pathlib.Path(__file__).absolute().parents[3])
+    str(pathlib.Path(__file__).absolute().parents[4])
 )
 
 from core.op import BasicOp
 from core.utils import OpTensorInfo, calc_tensor_size
+from backends.INTEL.ops.utils import generate_prefill_data, generate_prefill_session_cache_data, generate_decode_data
 
 OP_MAPPING = {}
-
-
-# generator for prefill mode
-def generate_prefill_data(
-    q_seq_len, cache_len
-):
-    q_lens = [q_seq_len]
-    accum_q_lens = [0, q_seq_len]
-    cache_lens = [cache_len]
-    cache_slot_ids = [0]
-
-    kv_lens = [q_len + kv_len for q_len, kv_len in zip(q_lens, cache_lens)]
-
-    return q_lens, accum_q_lens, cache_lens, cache_slot_ids, kv_lens
-
-
-# generator for prefill_session_cache mode
-def generate_prefill_session_cache_data(
-        batch_size,
-        target_q_len,
-        aver_cache_len
-):
-    # random q_len, accum to target_q_len
-    aver_q_len = target_q_len // batch_size
-    q_len_remainder = target_q_len % batch_size
-    q_len_offset = aver_q_len // 10
-    q_lens = []
-    for i in range(batch_size):
-        q_lens.append(aver_q_len + (1 if i < q_len_remainder else 0))
-    for i in range(batch_size):
-        q_lens[i] += random.randint(-q_len_offset, q_len_offset)
-
-    # accum q_lens
-    accum_q_lens = [0]
-    for i in range(batch_size):
-        accum_q_lens.append(accum_q_lens[-1] + q_lens[i])
-
-    # random cache_lens
-    cache_lens = [aver_cache_len for _ in range(batch_size)]
-    cache_offset = aver_cache_len // 10
-    for i in range(batch_size):
-        cache_lens[i] += random.randint(-cache_offset, cache_offset)
-
-    # sequential cache_slot_ids
-    cache_slot_ids = [i for i in range(batch_size)]
-
-    kv_lens = [q_len + kv_len for q_len, kv_len in zip(q_lens, cache_lens)]
-
-    return q_lens, accum_q_lens, cache_lens, cache_slot_ids, kv_lens
-
-
-# generator for decode mode
-def generate_decode_data(
-    batch_size,
-    q_seq_len,
-    aver_cache_len
-):
-    # fixed q_len
-    q_lens = [q_seq_len for _ in range(batch_size)]
-
-    # accum q_lens
-    accum_q_lens = [0]
-    for i in range(batch_size):
-        accum_q_lens.append(accum_q_lens[-1] + q_lens[i])
-
-    # random cache_lens
-    cache_lens = [aver_cache_len for _ in range(batch_size)]
-    cache_offset = aver_cache_len // 10
-    for i in range(batch_size):
-        cache_lens[i] += random.randint(-cache_offset, cache_offset)
-
-    # sequential cache_slot_ids
-    cache_slot_ids = [i for i in range(batch_size)]
-
-    kv_lens = [q_len + kv_len for q_len, kv_len in zip(q_lens, cache_lens)]
-
-    return q_lens, accum_q_lens, cache_lens, cache_slot_ids, kv_lens
 
 
 class StorePagedKVCacheOp(BasicOp):
@@ -269,24 +193,6 @@ class StorePagedKVCacheOp(BasicOp):
 
     def store_kv_cache_run(self, tensor_mapping):
         packed_qkv = tensor_mapping["packed_qkv"]
-        q_lens = tensor_mapping["q_lens"]
-        accum_q_lens = tensor_mapping["accum_q_lens"]
-        cache_lens = tensor_mapping["cache_lens"]
-        block_table = tensor_mapping["block_table"]
-        k_cache = tensor_mapping["k_cache"]
-        v_cache = tensor_mapping["v_cache"]
-        k_scale = tensor_mapping["k_scale"]
-        v_scale = tensor_mapping["v_scale"]
-
-        torch.ops.torch_ipex.store_paged_kv_cache(
-            packed_qkv, q_lens, accum_q_lens, cache_lens, block_table, k_cache, v_cache, k_scale,
-            v_scale, self.max_q_len)
-        return k_cache, v_cache
-
-
-class StorePagedKVCacheTorchOp(StorePagedKVCacheOp):
-    def store_kv_cache_run(self, tensor_mapping):
-        packed_qkv = tensor_mapping["packed_qkv"]
         block_table = tensor_mapping["block_table"]
         k_cache = tensor_mapping["k_cache"]
         v_cache = tensor_mapping["v_cache"]
@@ -315,9 +221,4 @@ class StorePagedKVCacheTorchOp(StorePagedKVCacheOp):
         return k_cache, v_cache
 
 
-try:
-    torch.ops.torch_ipex.store_paged_kv_cache
-    OP_MAPPING["store_paged_kv_cache"] = StorePagedKVCacheOp
-except Exception:
-    pass
-OP_MAPPING["torch"] = StorePagedKVCacheTorchOp
+OP_MAPPING["torch"] = StorePagedKVCacheOp
