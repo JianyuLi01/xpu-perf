@@ -4,7 +4,7 @@ from functools import partial
 import torch
 sys.path.insert(
     0,
-    str(pathlib.Path(__file__).absolute().parents[3])
+    str(pathlib.Path(__file__).absolute().parents[4])
 )
 
 from core.op import BasicOp
@@ -131,23 +131,6 @@ class AddRmsNormDynamicQuantOp(BasicOp):
         after_res = tensor_mapping["after_res"]
         after_norm = tensor_mapping["after_norm"]
 
-        torch.ops.torch_ipex.add_rms_norm_dynamic_quant(norm_weight, hidden_states, residual, smooth_scale,
-                                                        after_res, after_norm, quant_tokens,
-                                                        per_token_scale, self.eps)
-        return quant_tokens, per_token_scale, after_res, after_norm
-
-
-class AddRmsNormDynamicQuantTorchOp(AddRmsNormDynamicQuantOp):
-    def add_rms_norm_dynamic_quant_run(self, tensor_mapping):
-        hidden_states = tensor_mapping["hidden_states"]
-        residual = tensor_mapping.get("residual", None)
-        norm_weight = tensor_mapping["norm_weight"]
-        smooth_scale = tensor_mapping["smooth_scale"]
-        quant_tokens = tensor_mapping["quant_tokens"]
-        per_token_scale = tensor_mapping["per_token_scale"]
-        after_res = tensor_mapping["after_res"]
-        after_norm = tensor_mapping["after_norm"]
-
         if residual is not None:
             after_res.copy_(hidden_states + residual)
         else:
@@ -169,9 +152,5 @@ class AddRmsNormDynamicQuantTorchOp(AddRmsNormDynamicQuantOp):
         return quant_tokens, per_token_scale, after_res, after_norm
 
 
-try:
-    torch.ops.torch_ipex.add_rms_norm_dynamic_quant
-    OP_MAPPING["add_rms_norm_dynamic_quant"] = AddRmsNormDynamicQuantOp
-except Exception:
-    pass
-OP_MAPPING["torch"] = AddRmsNormDynamicQuantTorchOp
+
+OP_MAPPING["torch"] = AddRmsNormDynamicQuantOp
