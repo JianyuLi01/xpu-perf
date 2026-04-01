@@ -24,26 +24,11 @@ except:
     pass
 
 
-# https://github.com/vllm-project/vllm
+# https://github.com/vllm-project/vllm-xpu-kernels
 try:
-    INTEL_PROVIDER["vllm"] = {
-        "vllm": importlib.metadata.version("vllm"),
-    }
-except:
-    pass
-
-
-# https://github.com/flashinfer-ai/flashinfer
-try:
-    INTEL_PROVIDER["flashinfer"] = {
-        "flashinfer": importlib.metadata.version("flashinfer-python"),
-    }
-except:
-    pass
-
-try:
-    INTEL_PROVIDER["sageattention"] = {
-        "sageattention": importlib.metadata.version("sageattention")
+    import vllm_xpu_kernels._C
+    INTEL_PROVIDER["vllm_xpu_kernels"] = {
+        "vllm_xpu_kernels": importlib.metadata.version("vllm-xpu-kernels"),
     }
 except:
     pass
