@@ -14,7 +14,7 @@
             ],
             "batch_size": [1],
             "cache_len": [100],
-            "q_seq_len": [4096]
+            "q_len": [4096]
         },
         {
             "arg_type": "llm",
@@ -30,7 +30,7 @@
             ],
             "batch_size": [10, 20],
             "cache_len": [105],
-            "q_seq_len": [4]
+            "q_len": [4]
         },
         {
             "arg_type": "llm",
@@ -46,7 +46,7 @@
             ],
             "batch_size": [10],
             "cache_len": [100],
-            "q_seq_len": [4096]
+            "q_len": [4096]
         }
     ],
     "dequant_kv_cache": [
