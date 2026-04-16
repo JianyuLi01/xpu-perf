@@ -56,6 +56,7 @@ SUPPORTED_OPS = {
         # vector_activation_ops
         "gelu": GeluOp,
         "silu": SiluOp,
+        "silu_ext": SiluExtOp,
 
         # vector_index_ops
         "embedding": EmbeddingOp,
