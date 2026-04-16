@@ -54,8 +54,6 @@ def _get_silu_ext_module():
 
 
 
-
-
 @register_base_impl
 class GeluOp(CosOp):
     def __init__(self, args_dict, backend, *args, **kwargs):
