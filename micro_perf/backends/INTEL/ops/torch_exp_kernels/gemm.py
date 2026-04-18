@@ -19,5 +19,5 @@ try:
             b = tensor_mapping["b"]
             return torch_exp_kernels.gemm(a, b)
 
-except Exception:
+except ImportError:
     pass

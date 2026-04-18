@@ -9,5 +9,5 @@ try:
     INTEL_PROVIDER["torch_exp_kernels"] = {
         "torch_exp_kernels": importlib.metadata.version("torch_exp_kernels"),
     }
-except:
+except ImportError:
     pass
