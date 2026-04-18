@@ -120,11 +120,21 @@ class BaseEngine(ABC):
             for op_name, cases in test_cases.items():
                 index_mapping[op_name] = []
                 for case in cases:
+                    # 允许workload显式指定provider, 仅测试该provider
+                    # case里的"provider"字段不是op的真实参数, 单独提取后剔除
+                    case_args = case
+                    requested_provider = None
+                    if isinstance(case, dict) and "provider" in case:
+                        case_args = {k: v for k, v in case.items() if k != "provider"}
+                        requested_provider = case["provider"]
+
                     case_mapping = {}
                     for op_provider, op_provider_info in self.backend_instance.op_mapping[op_name].items():
+                        if requested_provider is not None and op_provider != requested_provider:
+                            continue
                         op_cls = op_provider_info["op_cls"]
                         case_mapping[op_provider] = task_idx
-                        self.input_queue.put((task_idx, (op_name, op_provider, op_cls), case))
+                        self.input_queue.put((task_idx, (op_name, op_provider, op_cls), case_args))
                         task_idx += 1
                     index_mapping[op_name].append(case_mapping)
 
