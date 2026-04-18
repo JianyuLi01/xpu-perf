@@ -32,3 +32,13 @@ try:
     }
 except:
     pass
+
+
+# torch_exp_kernels (only provides gemm)
+try:
+    import torch_exp_kernels
+    INTEL_PROVIDER["torch_exp_kernels"] = {
+        "torch_exp_kernels": importlib.metadata.version("torch_exp_kernels"),
+    }
+except:
+    pass
