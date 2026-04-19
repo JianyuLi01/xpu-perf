@@ -56,8 +56,16 @@ try:
 
         def _run_sycl_tla(self):
             """Run 00_bmg_gemm example binary and parse text output metrics."""
+            # Performance-critical env vars documented by sycl-tla for BMG/PVC GEMM
+            # (see sycl-tla/media/docs/cpp/build/building_with_sycl_support.md).
+            # In particular, -cl-intel-256-GRF-per-thread is required to avoid
+            # severe register spilling for the 256x256 work-group tile used by
+            # 00_bmg_gemm; without it, BF16 GEMM perf can drop ~10x.
             cmd = (
                 'SYCL_PROGRAM_COMPILE_OPTIONS="-ze-opt-large-register-file" '
+                'IGC_VISAOptions="-perfmodel" '
+                'IGC_VectorAliasBBThreshold=10000 '
+                'IGC_ExtraOCLOptions="-cl-intel-256-GRF-per-thread" '
                 f"{SYCL_TLA_GEMM_EXAMPLE_BINARY} "
                 f"--m={self.M} --n={self.N} --k={self.K} --l=1 "
                 f"--alpha=1 --beta=0 --iterations=100 --verify=0"
