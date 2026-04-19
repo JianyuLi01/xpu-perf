@@ -225,7 +225,7 @@ try:
                 return None
             try:
                 return json.loads(text[start:end + 1])
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError):
                 return None
 
         # ------------------------------------------------------------------ #

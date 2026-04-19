@@ -72,13 +72,17 @@ const std::vector<GemmInstance>& AllConfigs();
 inline bool ShouldPrune(const GemmInstance& cfg, const ProblemSize& p) {
     // 1) Drop configurations where the CTA tile is larger than the problem
     //    dimension by a wide margin: M < TileM/2 means most CTA work is
-    //    masked off and we should pick a smaller tile instead.
+    //    masked off and we should pick a smaller tile instead. The 32
+    //    floor leaves the smallest tiles in the search space alone --
+    //    they are the ones that handle very small M/N best.
     if (p.m * 2 < cfg.tile_shape.m && cfg.tile_shape.m > 32) return true;
     if (p.n * 2 < cfg.tile_shape.n && cfg.tile_shape.n > 32) return true;
 
-    // 2) Split-K only makes sense when there is enough K and not enough
-    //    M*N tiles to fill the device. Heuristic: enable split-K only when
-    //    K >= 2048 AND (M*N) <= 1024*1024.
+    // 2) Split-K only makes sense when there is enough K to amortise the
+    //    extra reduction AND when (M*N) tiles aren't already enough to
+    //    fill the device. Thresholds:
+    //      K  >= 2048    : minimum K for the reduction overhead to pay off.
+    //      M*N <= 1M     : above this, M*N tiles already saturate the GPU.
     if (cfg.split_k > 1) {
         if (p.k < 2048) return true;
         if (static_cast<long long>(p.m) * p.n > 1024LL * 1024LL) return true;

@@ -26,6 +26,7 @@
 
 #include "bmg_gemm_configs.hpp"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -202,8 +203,14 @@ void EnsureParentDir(const std::string& path) {
     if (pos == std::string::npos) return;
     std::string dir = path.substr(0, pos);
     if (dir.empty()) return;
-    // mkdir -p (only the immediate parent; deep paths should already exist)
-    ::mkdir(dir.c_str(), 0755);
+    // mkdir -p (only the immediate parent; deep paths should already exist).
+    // It is fine for this to fail with EEXIST; any other failure will be
+    // surfaced indirectly by CacheStore() failing to open the file.
+    if (::mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
+        std::fprintf(stderr,
+            "[bmg_gemm_launcher] mkdir(%s) failed: %s\n",
+            dir.c_str(), std::strerror(errno));
+    }
 }
 
 void CacheStore(const std::string& path, const std::string& key,

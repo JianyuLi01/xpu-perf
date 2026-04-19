@@ -21,15 +21,19 @@ void ReferenceGemm(const ProblemSize& p,
                    const std::vector<float>& B,
                    std::vector<float>& C) {
     // A: [M, K] row-major, B: [K, N] row-major, C: [M, N] row-major.
+    // Loop order m-k-n (instead of the textbook m-n-k) so the inner loop
+    // walks B sequentially in memory; otherwise the inner stride is N
+    // and verification on large shapes thrashes the cache.
     const int M = p.m, N = p.n, K = p.k;
+    std::fill(C.begin(), C.end(), 0.0f);
     for (int m = 0; m < M; ++m) {
-        for (int n = 0; n < N; ++n) {
-            double acc = 0.0;
-            for (int k = 0; k < K; ++k) {
-                acc += double(A[std::size_t(m) * K + k]) *
-                       double(B[std::size_t(k) * N + n]);
+        for (int k = 0; k < K; ++k) {
+            const float a = A[std::size_t(m) * K + k];
+            const float* b_row = &B[std::size_t(k) * N];
+            float* c_row       = &C[std::size_t(m) * N];
+            for (int n = 0; n < N; ++n) {
+                c_row[n] += a * b_row[n];
             }
-            C[std::size_t(m) * N + n] = float(acc);
         }
     }
 }
