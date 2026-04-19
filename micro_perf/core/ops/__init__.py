@@ -56,7 +56,6 @@ SUPPORTED_OPS = {
         # vector_activation_ops
         "gelu": GeluOp,
         "silu": SiluOp,
-        "silu_ext": SiluExtOp,
 
         # vector_index_ops
         "embedding": EmbeddingOp,
@@ -78,6 +77,7 @@ SUPPORTED_OPS = {
         "moe_softmax_topk": MoeSoftmaxTopkOp,
         "moe_scatter_dynamic_quant": MoeScatterDynamicQuantOp,
         "quant_matmul": QuantMatmulOp,
+        "moe_quant_matmul": QuantMatmulOp,  # INTEL custom, overridden by backend
         "quant_group_gemm_reduce_sum": QuantGroupGemmReduceSumOp,
         "moe_quant_group_gemm": MoeQuantGroupGemmOp,
         "moe_quant_group_gemm_combine": MoeQuantGroupGemmCombineOp,
@@ -95,8 +95,12 @@ SUPPORTED_OPS = {
         "head_rms_norm_dynamic_quant": HeadRMSNormDynamicQuantOp,
         "rotary_embedding": RotaryEmbeddingOp,
         "store_kv_cache": StoreKVCacheOp,
-        # "dequant_kv_cache": DequantKVCacheOp,
+        "store_paged_kv_cache": StoreKVCacheOp,  # INTEL custom, overridden by backend
+        "dequant_kv_cache": StoreKVCacheOp,  # INTEL custom, overridden by backend
         "flash_attention": FlashAttentionOp,
+        "sage_attention_v1": FlashAttentionOp,  # INTEL custom, overridden by backend
+        "sage_attention_page": FlashAttentionOp,  # INTEL custom, overridden by backend
+        "sage_attention_decode_page": FlashAttentionOp,  # INTEL custom, overridden by backend
     }
 }
 
