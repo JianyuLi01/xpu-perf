@@ -17,7 +17,7 @@ try:
         def vendor_impl_run(self, tensor_mapping):
             a = tensor_mapping["a"]
             b = tensor_mapping["b"]
-            c = torch_exp_kernels.gemm(a, b)
+            c = torch_exp_kernels.matmul(a, b)
             return c
 
     OP_MAPPING["torch_exp_kernels"] = TorchExpKernelsGemmOp
